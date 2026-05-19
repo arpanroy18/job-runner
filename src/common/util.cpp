@@ -46,3 +46,19 @@ int parse_mem_mb(const std::string& s) {
     return (int)v;
 }
 
+bool has_reserved_chars(const std::string& s) {
+    return s.find('\x1f') != std::string::npos || s.find('\x1e') != std::string::npos;
+}
+
+void log_line(const char* component, const std::string& msg) {
+    using namespace std::chrono;
+    int64_t t = duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
+    char ts[32];
+    time_t sec = t / 1000;
+    struct tm tmv;
+    localtime_r(&sec, &tmv);
+    strftime(ts, sizeof(ts), "%H:%M:%S", &tmv);
+    fprintf(stderr, "%s.%03d %-5s %s\n", ts, (int)(t % 1000), component, msg.c_str());
+}
+
+} // namespace jr
