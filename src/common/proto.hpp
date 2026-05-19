@@ -43,3 +43,12 @@ enum class Msg : uint8_t {
     LogEnd,         // stream finished
 };
 
+std::string join_fields(const std::vector<std::string>& fields);
+std::vector<std::string> split_fields(const std::string& payload);
+
+std::string join_list(const std::vector<std::string>& items);
+std::vector<std::string> split_list(const std::string& s);
+
+std::string sanitize(std::string s); // replaces FS/RS with spaces
+
+} // namespace jr
