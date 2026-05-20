@@ -28,3 +28,13 @@ static std::vector<std::string> split(const std::string& s, char sep) {
     }
 }
 
+std::string join_fields(const std::vector<std::string>& fields) { return join(fields, FS); }
+std::vector<std::string> split_fields(const std::string& payload) {
+    return payload.empty() ? std::vector<std::string>{} : split(payload, FS);
+}
+
+std::string join_list(const std::vector<std::string>& items) { return join(items, RS); }
+std::vector<std::string> split_list(const std::string& s) {
+    return s.empty() ? std::vector<std::string>{} : split(s, RS);
+}
+
