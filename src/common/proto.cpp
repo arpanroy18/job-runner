@@ -38,3 +38,10 @@ std::vector<std::string> split_list(const std::string& s) {
     return s.empty() ? std::vector<std::string>{} : split(s, RS);
 }
 
+std::string sanitize(std::string s) {
+    for (char& c : s)
+        if (c == FS || c == RS) c = ' ';
+    return s;
+}
+
+} // namespace jr
