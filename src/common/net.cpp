@@ -35,3 +35,31 @@ void Conn::close() {
     }
 }
 
+static bool write_all(int fd, const void* buf, size_t n) {
+    const char* p = (const char*)buf;
+    while (n > 0) {
+        ssize_t r = ::send(fd, p, n, MSG_NOSIGNAL);
+        if (r <= 0) {
+            if (errno == EINTR) continue;
+            return false;
+        }
+        p += r;
+        n -= r;
+    }
+    return true;
+}
+
+static bool read_all(int fd, void* buf, size_t n) {
+    char* p = (char*)buf;
+    while (n > 0) {
+        ssize_t r = ::recv(fd, p, n, 0);
+        if (r <= 0) {
+            if (r < 0 && errno == EINTR) continue;
+            return false;
+        }
+        p += r;
+        n -= r;
+    }
+    return true;
+}
+
