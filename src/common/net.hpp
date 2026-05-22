@@ -28,3 +28,8 @@ struct Conn {
     explicit operator bool() const { return fd >= 0; }
 };
 
+int tcp_listen(int port);                    // -1 on failure
+Conn tcp_accept(int listen_fd);              // fd < 0 on failure
+Conn tcp_connect(const std::string& host, int port, int timeout_ms = 3000);
+
+} // namespace jr
