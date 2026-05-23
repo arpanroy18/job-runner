@@ -78,7 +78,7 @@ bool Conn::recv_msg(uint8_t& type, std::string& payload) const {
     uint32_t len;
     memcpy(&len, head, 4);
     len = ntohl(len);
-    if (len == 0) return false;
+    if (len == 0 || len > kMaxFrame) return false;
     type = (uint8_t)head[4];
     payload.resize(len - 1);
     return payload.empty() || read_all(fd, payload.data(), payload.size());
