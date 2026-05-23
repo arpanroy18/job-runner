@@ -84,3 +84,81 @@ bool Conn::recv_msg(uint8_t& type, std::string& payload) const {
     return payload.empty() || read_all(fd, payload.data(), payload.size());
 }
 
+int tcp_listen(int port) {
+    int fd = ::socket(AF_INET6, SOCK_STREAM, 0);
+    if (fd >= 0) {
+        int one = 1, zero = 0;
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+        setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &zero, sizeof(zero)); // dual-stack
+        sockaddr_in6 addr{};
+        addr.sin6_family = AF_INET6;
+        addr.sin6_addr = in6addr_any;
+        addr.sin6_port = htons(port);
+        if (::bind(fd, (sockaddr*)&addr, sizeof(addr)) == 0 && ::listen(fd, 128) == 0)
+            return fd;
+        ::close(fd);
+    }
+    // IPv4-only fallback
+    fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    int one = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_port = htons(port);
+    if (::bind(fd, (sockaddr*)&addr, sizeof(addr)) < 0 || ::listen(fd, 128) < 0) {
+        ::close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+Conn tcp_accept(int listen_fd) {
+    sockaddr_storage ss{};
+    socklen_t slen = sizeof(ss);
+    int fd = ::accept(listen_fd, (sockaddr*)&ss, &slen);
+    if (fd < 0) return Conn{};
+    char host[INET6_ADDRSTRLEN] = "?";
+    uint16_t port = 0;
+    if (ss.ss_family == AF_INET6) {
+        auto* a = (sockaddr_in6*)&ss;
+        inet_ntop(AF_INET6, &a->sin6_addr, host, sizeof(host));
+        port = ntohs(a->sin6_port);
+    } else if (ss.ss_family == AF_INET) {
+        auto* a = (sockaddr_in*)&ss;
+        inet_ntop(AF_INET, &a->sin_addr, host, sizeof(host));
+        port = ntohs(a->sin_port);
+    }
+    return Conn(fd, std::string(host) + ":" + std::to_string(port));
+}
+
+Conn tcp_connect(const std::string& host, int port, int timeout_ms) {
+    addrinfo hints{};
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    addrinfo* res = nullptr;
+    if (getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &res) != 0)
+        return Conn{};
+
+    int fd = -1;
+    for (addrinfo* ai = res; ai; ai = ai->ai_next) {
+        fd = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (fd < 0) continue;
+        if (timeout_ms > 0) {
+            timeval tv{timeout_ms / 1000, (timeout_ms % 1000) * 1000};
+            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+        }
+        if (::connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) break;
+        ::close(fd);
+        fd = -1;
+    }
+    freeaddrinfo(res);
+    if (fd < 0) return Conn{};
+    // blocking I/O after connect
+    timeval tv{};
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)); // clear send timeout
+    return Conn(fd, host + ":" + std::to_string(port));
+}
+
+} // namespace jr
