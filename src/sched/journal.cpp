@@ -34,3 +34,19 @@ bool Journal::replay(const std::function<void(const std::string&)>& fn) const {
     return true;
 }
 
+bool Journal::rewrite(const std::vector<std::string>& records) {
+    std::string tmp = path_ + ".tmp";
+    {
+        std::ofstream tmpout(tmp, std::ios::trunc);
+        if (!tmpout.good()) return false;
+        for (const auto& r : records) tmpout << r << '\n';
+        tmpout.flush();
+    }
+    if (::rename(tmp.c_str(), path_.c_str()) != 0) return false;
+    out_.close();
+    out_.open(path_, std::ios::app);
+    lines_ = (int)records.size();
+    return out_.good();
+}
+
+} // namespace jr
