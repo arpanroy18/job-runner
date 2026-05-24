@@ -19,3 +19,18 @@ bool Journal::open(const std::string& path) {
     return out_.good();
 }
 
+void Journal::append(const std::string& record) {
+    out_ << record << '\n';
+    out_.flush();
+    lines_++;
+}
+
+bool Journal::replay(const std::function<void(const std::string&)>& fn) const {
+    std::ifstream in(path_);
+    if (!in.good()) return true; // empty history is fine
+    std::string line;
+    while (std::getline(in, line))
+        if (!line.empty()) fn(line);
+    return true;
+}
+
