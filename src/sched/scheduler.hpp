@@ -35,3 +35,22 @@ struct Job {
     std::string note;
 };
 
+struct Worker {
+    std::string id, name, peer;
+    int cpus = 0, mem_mb = 0, gpus = 0;
+    int used_cpus = 0, used_mem = 0, used_gpus = 0;
+    std::set<std::string> labels;
+    std::set<std::string> tasks;
+    int64_t last_seen = 0;
+    bool alive = true;
+    bool draining = false;            // no new assignments
+    Conn conn;
+    std::mutex conn_mu; // serializes sends to this worker
+};
+
+// A CLI connection subscribed to a job's output stream.
+struct Sub {
+    Conn conn;
+    std::mutex mu;
+};
+
