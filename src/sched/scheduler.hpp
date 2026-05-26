@@ -54,3 +54,9 @@ struct Sub {
     std::mutex mu;
 };
 
+struct Task {
+    std::string id, job_id, worker_id;
+};
+
+// Threading model: one thread per connection; all state is guarded by mu_.
+// Dispatch is O(#queued * #workers) — fine for local/fleet scale (10^4 jobs).
