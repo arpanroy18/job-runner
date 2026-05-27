@@ -47,3 +47,6 @@ struct Ctx {
     }
 };
 
+std::atomic<bool> g_stop{false};
+void on_signal(int) { g_stop = true; }
+
