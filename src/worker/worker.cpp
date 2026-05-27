@@ -62,3 +62,21 @@ void mkdir_p(const std::string& dir) {
     ::mkdir(dir.c_str(), 0755);
 }
 
+std::string read_tail(const std::string& path, size_t max) {
+    int fd = ::open(path.c_str(), O_RDONLY);
+    if (fd < 0) return {};
+    off_t size = lseek(fd, 0, SEEK_END);
+    off_t off = size > (off_t)max ? size - max : 0;
+    std::string out;
+    out.resize(size - off);
+    lseek(fd, off, SEEK_SET);
+    ssize_t n = ::read(fd, out.data(), out.size());
+    ::close(fd);
+    if (n < 0) return {};
+    out.resize(n);
+    return sanitize(std::move(out));
+}
+
+// Stream a task's log to the scheduler (which relays to `jr logs -f`
+// subscribers). Reads the spool file as it grows; exits after a final flush
+// once the task leaves the active set.
