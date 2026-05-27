@@ -50,3 +50,15 @@ struct Ctx {
 std::atomic<bool> g_stop{false};
 void on_signal(int) { g_stop = true; }
 
+int total_mem_mb() {
+    struct sysinfo si;
+    if (sysinfo(&si) != 0) return 4096;
+    return (int)(si.totalram * si.mem_unit / (1024 * 1024));
+}
+
+void mkdir_p(const std::string& dir) {
+    for (size_t i = 1; i < dir.size(); i++)
+        if (dir[i] == '/') ::mkdir(dir.substr(0, i).c_str(), 0755);
+    ::mkdir(dir.c_str(), 0755);
+}
+
