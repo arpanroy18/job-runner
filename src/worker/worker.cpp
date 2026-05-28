@@ -175,3 +175,19 @@ void kill_task(Ctx& ctx, const std::string& task_id) {
     if (it != ctx.running.end()) ::kill(-it->second, SIGKILL);
 }
 
+void heartbeat_loop(Ctx& ctx) {
+    while (ctx.alive) {
+        std::vector<std::string> ids;
+        {
+            std::lock_guard<std::mutex> lk(ctx.run_mu);
+            for (auto& [id, _] : ctx.running) ids.push_back(id);
+        }
+        if (!ctx.send((uint8_t)Msg::Heartbeat, join_fields({ctx.id, join_list(ids)})))
+            return; // connection dead; main loop notices too
+        for (int i = 0; i < 20 && ctx.alive && !g_stop; i++)
+            std::this_thread::sleep_for(std::chrono::milliseconds(kHeartbeatMs / 20));
+    }
+}
+
+} // namespace
+
