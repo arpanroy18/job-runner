@@ -112,3 +112,60 @@ void stream_task(Ctx& ctx, const std::string& task_id) {
     }
 }
 
+void run_task(Ctx& ctx, const std::string& task_id, const std::string& cwd,
+              const std::vector<std::string>& env,
+              const std::vector<std::string>& argv, int mem_mb, bool limit) {
+    std::string log_path = ctx.spool_dir + "/" + task_id + ".log";
+    int logfd = ::open(log_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        setsid(); // own process group -> Kill can take down the whole tree
+        if (logfd >= 0) {
+            dup2(logfd, STDOUT_FILENO);
+            dup2(logfd, STDERR_FILENO);
+        }
+        if (limit && mem_mb > 0) {
+            rlimit rl{(rlim_t)mem_mb << 20, (rlim_t)mem_mb << 20};
+            setrlimit(RLIMIT_AS, &rl);
+        }
+        for (const auto& kv : env) {
+            size_t eq = kv.find('=');
+            if (eq != std::string::npos)
+                setenv(kv.substr(0, eq).c_str(), kv.substr(eq + 1).c_str(), 1);
+        }
+        if (!cwd.empty() && ::chdir(cwd.c_str()) != 0)
+            dprintf(STDERR_FILENO, "chdir(%s) failed\n", cwd.c_str());
+        std::vector<char*> args;
+        for (const auto& a : argv) args.push_back(const_cast<char*>(a.c_str()));
+        args.push_back(nullptr);
+        execvp(args[0], args.data());
+        dprintf(STDERR_FILENO, "execvp(%s) failed\n", argv[0].c_str());
+        _exit(127);
+    }
+    if (logfd >= 0) ::close(logfd);
+
+    if (pid < 0) {
+        ctx.send((uint8_t)Msg::TaskResult, join_fields({task_id, "127", "fork failed"}));
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lk(ctx.run_mu);
+        ctx.running[task_id] = pid; // pid == pgid after setsid
+    }
+
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+
+    {
+        std::lock_guard<std::mutex> lk(ctx.run_mu);
+        ctx.running.erase(task_id);
+        ctx.active.erase(task_id);
+    }
+
+    int code = WIFEXITED(status) ? WEXITSTATUS(status)
+             : WIFSIGNALED(status) ? 128 + WTERMSIG(status) : -1;
+    ctx.send((uint8_t)Msg::TaskResult,
+             join_fields({task_id, std::to_string(code), read_tail(log_path, kTailBytes)}));
+}
+
