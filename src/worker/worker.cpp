@@ -80,3 +80,35 @@ std::string read_tail(const std::string& path, size_t max) {
 // Stream a task's log to the scheduler (which relays to `jr logs -f`
 // subscribers). Reads the spool file as it grows; exits after a final flush
 // once the task leaves the active set.
+void stream_task(Ctx& ctx, const std::string& task_id) {
+    std::string path = ctx.spool_dir + "/" + task_id + ".log";
+    int fd = -1;
+    off_t pos = 0;
+    for (;;) {
+        bool active;
+        {
+            std::lock_guard<std::mutex> lk(ctx.run_mu);
+            active = ctx.active.count(task_id) > 0;
+        }
+        if (fd < 0) {
+            fd = ::open(path.c_str(), O_RDONLY);
+            if (fd < 0 && !active) return;
+        }
+        bool read_any = false;
+        if (fd >= 0) {
+            char buf[16384];
+            lseek(fd, pos, SEEK_SET);
+            ssize_t n;
+            while ((n = ::read(fd, buf, sizeof(buf))) > 0) {
+                pos += n;
+                read_any = true;
+                if (!ctx.send((uint8_t)Msg::LogData,
+                              join_fields({task_id, sanitize(std::string(buf, n))})))
+                    return;
+            }
+        }
+        if (!active && !read_any) return;
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+}
+
