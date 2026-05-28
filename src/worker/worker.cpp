@@ -169,3 +169,9 @@ void run_task(Ctx& ctx, const std::string& task_id, const std::string& cwd,
              join_fields({task_id, std::to_string(code), read_tail(log_path, kTailBytes)}));
 }
 
+void kill_task(Ctx& ctx, const std::string& task_id) {
+    std::lock_guard<std::mutex> lk(ctx.run_mu);
+    auto it = ctx.running.find(task_id);
+    if (it != ctx.running.end()) ::kill(-it->second, SIGKILL);
+}
+
