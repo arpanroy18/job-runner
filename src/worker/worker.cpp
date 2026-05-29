@@ -191,3 +191,81 @@ void heartbeat_loop(Ctx& ctx) {
 
 } // namespace
 
+int run_worker(const std::string& host, int port, const WorkerOpts& opts,
+               const std::string& state_dir) {
+    Ctx ctx;
+    ctx.spool_dir = state_dir + "/logs";
+    mkdir_p(ctx.spool_dir);
+
+    ctx.conn = tcp_connect(host, port);
+    if (!ctx.conn) {
+        log_line("work", "cannot connect to " + host + ":" + std::to_string(port));
+        return 1;
+    }
+
+    std::string name = opts.name.empty() ? hostname() : opts.name;
+    int cpus = opts.cpus > 0 ? opts.cpus : (int)std::thread::hardware_concurrency();
+    int mem = opts.mem_mb > 0 ? opts.mem_mb : total_mem_mb();
+
+    if (!ctx.conn.send_msg((uint8_t)Msg::Register,
+                           join_fields({name, std::to_string(cpus),
+                                        std::to_string(mem), std::to_string(opts.gpus),
+                                        join_list(opts.labels)})))
+        return 1;
+    uint8_t type;
+    std::string payload;
+    if (!ctx.conn.recv_msg(type, payload) || (Msg)type != Msg::RegAck) {
+        log_line("work", "registration rejected");
+        return 1;
+    }
+    ctx.id = payload;
+    log_line("work", "registered as " + ctx.id + " (" + name + "): " +
+                     std::to_string(cpus) + " cpu, " + std::to_string(mem) +
+                     " MB, " + std::to_string(opts.gpus) + " gpu");
+
+    struct sigaction sa{};
+    sa.sa_handler = on_signal;
+    sigaction(SIGINT, &sa, nullptr);
+    sigaction(SIGTERM, &sa, nullptr);
+    signal(SIGPIPE, SIG_IGN);
+
+    std::thread hb(heartbeat_loop, std::ref(ctx));
+
+    while (ctx.alive && !g_stop) {
+        if (!ctx.conn.recv_msg(type, payload)) break;
+        auto f = split_fields(payload);
+        if ((Msg)type == Msg::Assign && f.size() >= 5) {
+            std::string tid = f[0], cwd = f[2];
+            auto env = split_list(f[3]);
+            auto argv = split_list(f[4]);
+            int mem_mb = f.size() > 5 ? atoi(f[5].c_str()) : 0;
+            bool limit = f.size() > 6 && f[6] == "1";
+            if (!argv.empty()) {
+                {
+                    std::lock_guard<std::mutex> lk(ctx.run_mu);
+                    ctx.active.insert(tid);
+                }
+                std::thread(run_task, std::ref(ctx), tid, cwd, env, argv, mem_mb, limit)
+                    .detach();
+            }
+        } else if ((Msg)type == Msg::Kill && f.size() >= 1) {
+            kill_task(ctx, f[0]);
+        } else if ((Msg)type == Msg::LogSub && f.size() >= 1) {
+            std::lock_guard<std::mutex> lk(ctx.run_mu);
+            if (ctx.streaming.insert(f[0]).second)
+                std::thread(stream_task, std::ref(ctx), f[0]).detach();
+        }
+    }
+
+    // Shutdown: stop heartbeats, kill any children still running.
+    ctx.alive = false;
+    {
+        std::lock_guard<std::mutex> lk(ctx.run_mu);
+        for (auto& [_, pgid] : ctx.running) ::kill(-pgid, SIGKILL);
+    }
+    hb.join();
+    log_line("work", ctx.id + " stopped");
+    return 0;
+}
+
+} // namespace jr
