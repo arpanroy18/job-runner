@@ -22,3 +22,15 @@ std::atomic<bool> g_stop{false};
 void on_signal(int) { g_stop = true; }
 } // namespace
 
+const char* state_name(JobState s) {
+    switch (s) {
+        case JobState::Queued:    return "queued";
+        case JobState::Blocked:   return "blocked";
+        case JobState::Running:   return "running";
+        case JobState::Done:      return "done";
+        case JobState::Failed:    return "failed";
+        case JobState::Cancelled: return "cancelled";
+    }
+    return "?";
+}
+
