@@ -34,3 +34,14 @@ const char* state_name(JobState s) {
     return "?";
 }
 
+static bool is_terminal(JobState s) {
+    return s == JobState::Done || s == JobState::Failed || s == JobState::Cancelled;
+}
+
+static int to_int(const std::string& s, int fallback = -1) {
+    if (s.empty()) return fallback;
+    char* end = nullptr;
+    long v = strtol(s.c_str(), &end, 10);
+    return (end && *end == 0) ? (int)v : fallback;
+}
+
