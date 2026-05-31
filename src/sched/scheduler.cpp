@@ -203,3 +203,21 @@ void Scheduler::on_register(Conn c, const std::vector<std::string>& f) {
     dispatch();
 }
 
+void Scheduler::kill_worker(Worker& w) {
+    w.alive = false;
+    w.conn.close();
+    auto lost = std::move(w.tasks); // requeue each task's job
+    w.used_cpus = w.used_mem = w.used_gpus = 0;
+    log_line("sched", "worker " + w.id + " lost");
+    for (const auto& tid : lost) {
+        auto it = tasks_.find(tid);
+        if (it == tasks_.end()) continue;
+        Task t = it->second;
+        tasks_.erase(it);
+        Job& j = jobs_.at(t.job_id);
+        j.worker_id.clear();
+        j.task_id.clear();
+        fail_or_retry(j, "worker lost");
+    }
+}
+
