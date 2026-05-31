@@ -90,3 +90,63 @@ int Scheduler::run(int port, const std::string& state_dir) {
     return 0;
 }
 
+void Scheduler::serve_conn(Conn c) {
+    uint8_t type;
+    std::string payload;
+    if (!c.recv_msg(type, payload)) return;
+    auto f = split_fields(payload);
+
+    if ((Msg)type == Msg::Register) {
+        on_register(std::move(c), f); // takes ownership, runs until worker drops
+        return;
+    }
+
+    if ((Msg)type == Msg::SubLogs) {
+        std::lock_guard<std::mutex> lk(mu_);
+        on_sub_logs(std::move(c), f); // takes ownership until LogEnd
+        return;
+    }
+
+    std::string reply;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        switch ((Msg)type) {
+            case Msg::Submit:
+                on_submit(c, f);
+                return;
+            case Msg::CancelJob:
+                on_cancel(c, f);
+                return;
+            case Msg::ListJobs:    reply = job_table(); break;
+            case Msg::ListWorkers: reply = worker_table(); break;
+            case Msg::JobInfo:     reply = f.empty() ? "usage: info <job>" : job_info(f[0]); break;
+            case Msg::Stats:       reply = stats(); break;
+            case Msg::JobState: {
+                auto it = f.empty() ? jobs_.end() : jobs_.find(f[0]);
+                reply = it == jobs_.end()
+                        ? "unknown"
+                        : join_fields({state_name(it->second.state),
+                                       std::to_string(it->second.exit_code)});
+                break;
+            }
+            case Msg::DrainWorker: {
+                if (f.size() < 2) { c.send_msg((uint8_t)Msg::Error, "usage: drain <worker> [0|1]"); return; }
+                auto it = workers_.find(f[0]);
+                if (it == workers_.end() || !it->second.alive) {
+                    c.send_msg((uint8_t)Msg::Error, "no live worker: " + f[0]);
+                    return;
+                }
+                it->second.draining = f[1] != "0";
+                c.send_msg((uint8_t)Msg::Reply,
+                           f[0] + (it->second.draining ? " draining\n" : " undrained\n"));
+                dispatch();
+                return;
+            }
+            default:
+                c.send_msg((uint8_t)Msg::Error, "unknown request");
+                return;
+        }
+    }
+    c.send_msg((uint8_t)Msg::Reply, reply);
+}
+
