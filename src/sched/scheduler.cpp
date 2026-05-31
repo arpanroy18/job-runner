@@ -150,3 +150,56 @@ void Scheduler::serve_conn(Conn c) {
     c.send_msg((uint8_t)Msg::Reply, reply);
 }
 
+// ------------------------------------------------------------------ workers
+
+void Scheduler::on_register(Conn c, const std::vector<std::string>& f) {
+    if (f.size() < 4) {
+        c.send_msg((uint8_t)Msg::Error, "bad register");
+        return;
+    }
+    Worker* w;
+    std::string wid;
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        wid = "w-" + std::to_string(next_worker_++);
+        w = &workers_.try_emplace(wid).first->second;
+        w->id = wid;
+        w->name = f[0].empty() ? wid : f[0];
+        w->peer = c.peer;
+        w->cpus = to_int(f[1], 1);
+        w->mem_mb = to_int(f[2], 0);
+        w->gpus = to_int(f[3], 0);
+        if (f.size() > 4)
+            for (const auto& l : split_list(f[4])) w->labels.insert(l);
+        w->last_seen = now_ms();
+        w->conn = std::move(c);
+        if (!send_to_worker(*w, (uint8_t)Msg::RegAck, wid)) {
+            workers_.erase(wid);
+            return;
+        }
+        log_line("sched", "worker " + wid + " (" + w->name + ") up: " +
+                          std::to_string(w->cpus) + " cpu, " +
+                          std::to_string(w->mem_mb) + " MB, " +
+                          std::to_string(w->gpus) + " gpu");
+        dispatch();
+    }
+
+    for (;;) {
+        uint8_t type;
+        std::string payload;
+        if (!w->conn.recv_msg(type, payload)) break;
+        auto f = split_fields(payload);
+        std::lock_guard<std::mutex> lk(mu_);
+        if (!w->alive) break;
+        w->last_seen = now_ms();
+        if ((Msg)type == Msg::TaskResult) on_task_result(f);
+        else if ((Msg)type == Msg::LogData) on_log_data(f);
+        // Heartbeat: timestamp updated above; running-task ids in f[1] are
+        // advisory (scheduler is authoritative).
+    }
+
+    std::lock_guard<std::mutex> lk(mu_);
+    if (w->alive) kill_worker(*w);
+    dispatch();
+}
+
