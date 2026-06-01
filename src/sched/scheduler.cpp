@@ -226,3 +226,45 @@ bool Scheduler::send_to_worker(Worker& w, uint8_t type, const std::string& paylo
     return w.conn.send_msg(type, payload);
 }
 
+// ------------------------------------------------------------------ dispatch
+
+// Move blocked jobs forward when their dependencies resolve: all deps done
+// -> queued; any dep failed/cancelled -> failed ("dep broken"). Job ids are
+// minted at submit time and deps are immutable, so dependency cycles cannot
+// be constructed.
+void Scheduler::promote_blocked() {
+    for (auto& [_, j] : jobs_) {
+        if (j.state != JobState::Blocked) continue;
+        bool bad_dep = false;
+        for (const auto& d : j.after) {
+            auto it = jobs_.find(d);
+            if (it != jobs_.end() && it->second.state != JobState::Done) {
+                if (it->second.state == JobState::Failed ||
+                    it->second.state == JobState::Cancelled)
+                    bad_dep = true;
+            }
+        }
+        if (bad_dep) {
+            j.note = "dependency failed";
+            finish_job(j, JobState::Failed);
+            log_line("sched", "job " + j.id + " failed (dependency failed)");
+        } else {
+            bool all_done = true;
+            for (const auto& d : j.after) {
+                auto it = jobs_.find(d);
+                if (it == jobs_.end() || it->second.state != JobState::Done)
+                    all_done = false;
+            }
+            if (all_done) {
+                j.state = JobState::Queued;
+                j.ready_ts = 0;
+                journal_state(j);
+                log_line("sched", "job " + j.id + " unblocked");
+            }
+        }
+    }
+}
+
+// Best fit: pick the fitting worker with the least free cpus, keeping big
+// workers free for big jobs. Jobs are tried in (prio desc, age asc) order;
+// a job that doesn't fit doesn't block smaller jobs behind it (backfill).
