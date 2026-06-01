@@ -221,3 +221,8 @@ void Scheduler::kill_worker(Worker& w) {
     }
 }
 
+bool Scheduler::send_to_worker(Worker& w, uint8_t type, const std::string& payload) {
+    std::lock_guard<std::mutex> lk(w.conn_mu);
+    return w.conn.send_msg(type, payload);
+}
+
