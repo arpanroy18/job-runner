@@ -326,3 +326,19 @@ void Scheduler::dispatch() {
     }
 }
 
+void Scheduler::release_task(const Task& t) {
+    auto wit = workers_.find(t.worker_id);
+    if (wit != workers_.end()) {
+        Worker& w = wit->second;
+        auto jit = jobs_.find(t.job_id);
+        if (jit != jobs_.end()) {
+            w.used_cpus -= jit->second.cpus;
+            w.used_mem -= jit->second.mem_mb;
+            w.used_gpus -= jit->second.gpus;
+        }
+        w.tasks.erase(t.id);
+    }
+    tasks_.erase(t.id);
+}
+
+// Terminal transition: stamp, journal, tell log subscribers we're done.
