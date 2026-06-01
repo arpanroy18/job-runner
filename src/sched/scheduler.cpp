@@ -268,3 +268,61 @@ void Scheduler::promote_blocked() {
 // Best fit: pick the fitting worker with the least free cpus, keeping big
 // workers free for big jobs. Jobs are tried in (prio desc, age asc) order;
 // a job that doesn't fit doesn't block smaller jobs behind it (backfill).
+void Scheduler::dispatch() {
+    promote_blocked();
+
+    std::vector<Job*> queued;
+    int64_t now = now_ms();
+    for (auto& [_, j] : jobs_)
+        if (j.state == JobState::Queued && j.ready_ts <= now) queued.push_back(&j);
+    std::sort(queued.begin(), queued.end(), [](const Job* a, const Job* b) {
+        return a->prio != b->prio ? a->prio > b->prio : a->submit_ts < b->submit_ts;
+    });
+
+    for (Job* j : queued) {
+        Worker* best = nullptr;
+        for (auto& [_, w] : workers_) {
+            int free_cpu = w.cpus - w.used_cpus;
+            if (!w.alive || w.draining || free_cpu < j->cpus ||
+                w.mem_mb - w.used_mem < j->mem_mb ||
+                w.gpus - w.used_gpus < j->gpus)
+                continue;
+            bool labels_ok = true;
+            for (const auto& r : j->require)
+                if (!w.labels.count(r)) labels_ok = false;
+            if (!labels_ok) continue;
+            if (!best || free_cpu < best->cpus - best->used_cpus) best = &w;
+        }
+        if (!best) continue;
+
+        Task t;
+        t.id = "t-" + std::to_string(next_task_++);
+        t.job_id = j->id;
+        t.worker_id = best->id;
+        std::string payload = join_fields({t.id, j->id, j->cwd, join_list(j->env),
+                                           join_list(j->argv), std::to_string(j->mem_mb),
+                                           j->limit ? "1" : "0"});
+        if (!send_to_worker(*best, (uint8_t)Msg::Assign, payload)) {
+            kill_worker(*best);
+            continue;
+        }
+        best->used_cpus += j->cpus;
+        best->used_mem += j->mem_mb;
+        best->used_gpus += j->gpus;
+        best->tasks.insert(t.id);
+        tasks_.emplace(t.id, t);
+        j->runs++;
+        j->state = JobState::Running;
+        j->start_ts = now;
+        j->ready_ts = 0;
+        j->worker_id = best->id;
+        j->task_id = t.id;
+        journal_state(*j);
+        log_line("sched", "job " + j->id + " -> " + best->id + " (run " +
+                          std::to_string(j->runs) + ")");
+        auto it = subs_.find(j->id);
+        if (it != subs_.end() && !it->second.empty())
+            send_to_worker(*best, (uint8_t)Msg::LogSub, t.id);
+    }
+}
+
