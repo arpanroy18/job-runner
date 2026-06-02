@@ -342,3 +342,12 @@ void Scheduler::release_task(const Task& t) {
 }
 
 // Terminal transition: stamp, journal, tell log subscribers we're done.
+void Scheduler::finish_job(Job& j, JobState s) {
+    j.state = s;
+    j.end_ts = now_ms();
+    j.task_id.clear();
+    journal_state(j);
+    end_subs(j.id);
+    maybe_compact();
+}
+
