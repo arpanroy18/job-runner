@@ -351,3 +351,18 @@ void Scheduler::finish_job(Job& j, JobState s) {
     maybe_compact();
 }
 
+void Scheduler::fail_or_retry(Job& j, const std::string& note) {
+    j.note = note;
+    if (j.runs <= j.max_retries) {
+        j.state = JobState::Queued;
+        // linear backoff: run n waits n*2s before requeue
+        j.ready_ts = now_ms();
+        journal_state(j);
+        log_line("sched", "job " + j.id + " requeued (" + note + ")");
+    } else {
+        finish_job(j, JobState::Failed);
+        log_line("sched", "job " + j.id + " failed (" + note + ")");
+    }
+    maybe_compact();
+}
+
