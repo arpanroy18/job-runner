@@ -356,7 +356,7 @@ void Scheduler::fail_or_retry(Job& j, const std::string& note) {
     if (j.runs <= j.max_retries) {
         j.state = JobState::Queued;
         // linear backoff: run n waits n*2s before requeue
-        j.ready_ts = now_ms();
+        j.ready_ts = now_ms() + j.runs * 2000;
         journal_state(j);
         log_line("sched", "job " + j.id + " requeued (" + note + ")");
     } else {
