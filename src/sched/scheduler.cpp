@@ -441,3 +441,14 @@ void Scheduler::on_sub_logs(Conn c, const std::vector<std::string>& f) {
     }
 }
 
+void Scheduler::end_subs(const std::string& job_id) {
+    auto it = subs_.find(job_id);
+    if (it == subs_.end()) return;
+    for (auto& s : it->second) {
+        std::lock_guard<std::mutex> lk(s->mu);
+        s->conn.send_msg((uint8_t)Msg::LogEnd, "");
+        s->conn.close();
+    }
+    subs_.erase(it);
+}
+
