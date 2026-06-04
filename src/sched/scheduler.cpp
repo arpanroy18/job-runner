@@ -413,3 +413,31 @@ void Scheduler::on_log_data(const std::vector<std::string>& f) {
 
 // `jr logs <job> [-f]`: replay stored tail, then (with -f) stream live chunks
 // relayed from the worker until the job reaches a terminal state.
+void Scheduler::on_sub_logs(Conn c, const std::vector<std::string>& f) {
+    if (f.empty()) {
+        c.send_msg((uint8_t)Msg::Error, "usage: logs <job> [-f]");
+        return;
+    }
+    auto it = jobs_.find(f[0]);
+    if (it == jobs_.end()) {
+        c.send_msg((uint8_t)Msg::Error, "no such job: " + f[0]);
+        return;
+    }
+    Job& j = it->second;
+    bool follow = f.size() > 1 && f[1] == "1";
+    if (!j.output_tail.empty()) c.send_msg((uint8_t)Msg::LogChunk, j.output_tail);
+    if (!follow || is_terminal(j.state)) {
+        c.send_msg((uint8_t)Msg::LogEnd, "");
+        return;
+    }
+    auto sub = std::make_shared<Sub>();
+    sub->conn = std::move(c);
+    subs_[j.id].push_back(sub);
+    // If the job is already running, ask the worker to start streaming.
+    if (j.state == JobState::Running && !j.task_id.empty()) {
+        auto wit = workers_.find(j.worker_id);
+        if (wit != workers_.end() && wit->second.alive)
+            send_to_worker(wit->second, (uint8_t)Msg::LogSub, j.task_id);
+    }
+}
+
