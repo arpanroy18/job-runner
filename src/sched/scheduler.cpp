@@ -499,3 +499,36 @@ void Scheduler::on_submit(Conn& c, const std::vector<std::string>& f) {
     dispatch();
 }
 
+void Scheduler::on_cancel(Conn& c, const std::vector<std::string>& f) {
+    if (f.empty()) {
+        c.send_msg((uint8_t)Msg::Error, "usage: cancel <job>");
+        return;
+    }
+    auto it = jobs_.find(f[0]);
+    if (it == jobs_.end()) {
+        c.send_msg((uint8_t)Msg::Error, "no such job: " + f[0]);
+        return;
+    }
+    Job& j = it->second;
+    if (j.state == JobState::Done || j.state == JobState::Failed ||
+        j.state == JobState::Cancelled) {
+        c.send_msg((uint8_t)Msg::Reply, f[0] + " already " + state_name(j.state));
+        return;
+    }
+    Worker* w = nullptr;
+    std::string task = j.task_id;
+    if (j.state == JobState::Running) {
+        auto tit = tasks_.find(j.task_id);
+        if (tit != tasks_.end()) {
+            auto wit = workers_.find(tit->second.worker_id);
+            if (wit != workers_.end()) w = &wit->second;
+            release_task(tit->second);
+        }
+    }
+    finish_job(j, JobState::Cancelled);
+    if (w) send_to_worker(*w, (uint8_t)Msg::Kill, task);
+    c.send_msg((uint8_t)Msg::Reply, "cancelled " + f[0] + "\n");
+    log_line("sched", "job " + f[0] + " cancelled");
+    dispatch();
+}
+
