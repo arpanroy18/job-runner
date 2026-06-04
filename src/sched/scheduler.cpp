@@ -366,3 +366,28 @@ void Scheduler::fail_or_retry(Job& j, const std::string& note) {
     maybe_compact();
 }
 
+void Scheduler::on_task_result(const std::vector<std::string>& f) {
+    if (f.size() < 2) return;
+    auto it = tasks_.find(f[0]);
+    if (it == tasks_.end()) return; // stale result (job cancelled / resubmitted)
+    Task t = it->second;
+    release_task(t);
+
+    Job& j = jobs_.at(t.job_id);
+    if (j.state != JobState::Running || j.task_id != t.id) return; // stale
+
+    j.task_id.clear();
+    j.exit_code = to_int(f[1], -1);
+    if (f.size() > 2) j.output_tail = sanitize(f[2]);
+
+    if (j.exit_code == 0) {
+        finish_job(j, JobState::Done);
+        log_line("sched", "job " + j.id + " done");
+    } else {
+        fail_or_retry(j, "exit " + std::to_string(j.exit_code));
+    }
+    maybe_compact();
+    dispatch();
+}
+
+// Worker -> scheduler log relay: forward chunks to the job's subscribers.
