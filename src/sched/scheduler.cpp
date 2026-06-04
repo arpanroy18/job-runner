@@ -452,3 +452,50 @@ void Scheduler::end_subs(const std::string& job_id) {
     subs_.erase(it);
 }
 
+// --------------------------------------------------------------------- cli
+
+void Scheduler::on_submit(Conn& c, const std::vector<std::string>& f) {
+    if (f.size() < 9) {
+        c.send_msg((uint8_t)Msg::Error, "bad submit");
+        return;
+    }
+    Job j;
+    j.id = "j-" + std::to_string(next_job_++);
+    j.name = f[0].substr(0, kMaxJobName);
+    j.prio = to_int(f[1], 0);
+    j.cpus = to_int(f[2], 1);
+    j.mem_mb = to_int(f[3], 256);
+    j.gpus = to_int(f[4], 0);
+    j.max_retries = to_int(f[5], 0);
+    j.cwd = f[6];
+    j.env = split_list(f[7]);
+    j.argv = split_list(f[8]);
+    if (f.size() > 9) j.after = split_list(f[9]);
+    if (f.size() > 10) j.require = split_list(f[10]);
+    if (f.size() > 11) j.limit = f[11] == "1";
+    j.submit_ts = now_ms();
+
+    if (j.argv.empty() || j.argv[0].empty() || j.cpus < 1 || j.mem_mb < 1 || j.gpus < 0) {
+        c.send_msg((uint8_t)Msg::Error, "invalid job spec");
+        return;
+    }
+    bool unmet = false;
+    for (const auto& d : j.after) {
+        auto it = jobs_.find(d);
+        if (it == jobs_.end()) {
+            c.send_msg((uint8_t)Msg::Error, "unknown dependency: " + d);
+            return;
+        }
+        // A failed dep lands in Blocked; promote_blocked fails it immediately.
+        if (it->second.state != JobState::Done) unmet = true;
+    }
+    std::string id = j.id;
+    journal_submit(j);
+    jobs_.emplace(id, std::move(j));
+    c.send_msg((uint8_t)Msg::Reply, "submitted " + id + "\n");
+    log_line("sched", "job " + id + " submitted");
+    if (unmet) jobs_.at(id).state = JobState::Blocked;
+    maybe_compact();
+    dispatch();
+}
+
