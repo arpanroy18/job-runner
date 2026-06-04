@@ -391,3 +391,25 @@ void Scheduler::on_task_result(const std::vector<std::string>& f) {
 }
 
 // Worker -> scheduler log relay: forward chunks to the job's subscribers.
+void Scheduler::on_log_data(const std::vector<std::string>& f) {
+    if (f.size() < 2) return;
+    auto it = tasks_.find(f[0]);
+    if (it == tasks_.end()) return;
+    auto sit = subs_.find(it->second.job_id);
+    if (sit == subs_.end()) return;
+    const std::string& chunk = f[1];
+    auto& subs = sit->second;
+    for (size_t i = 0; i < subs.size();) {
+        Sub& s = *subs[i];
+        std::lock_guard<std::mutex> lk(s.mu);
+        if (s.conn.send_msg((uint8_t)Msg::LogChunk, chunk)) {
+            i++;
+        } else {
+            s.conn.close();
+            subs.erase(subs.begin() + i);
+        }
+    }
+}
+
+// `jr logs <job> [-f]`: replay stored tail, then (with -f) stream live chunks
+// relayed from the worker until the job reaches a terminal state.
