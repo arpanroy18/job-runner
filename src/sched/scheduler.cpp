@@ -532,3 +532,32 @@ void Scheduler::on_cancel(Conn& c, const std::vector<std::string>& f) {
     dispatch();
 }
 
+// ------------------------------------------------------------------ replies
+
+std::string Scheduler::job_table() const {
+    std::vector<const Job*> js;
+    for (auto& [_, j] : jobs_) js.push_back(&j);
+    std::sort(js.begin(), js.end(),
+              [](const Job* a, const Job* b) { return a->submit_ts < b->submit_ts; });
+
+    std::string out;
+    char line[256];
+    snprintf(line, sizeof(line), "%-9s %-10s %-7s %4s %4s %6s  %s\n",
+             "JOB", "STATE", "WORKER", "PRIO", "RUNS", "AGE", "COMMAND");
+    out += line;
+    int64_t now = now_ms();
+    for (const Job* j : js) {
+        std::string cmd;
+        for (const auto& a : j->argv) { if (!cmd.empty()) cmd += ' '; cmd += a; }
+        if (cmd.size() > 60) cmd = cmd.substr(0, 57) + "...";
+        int64_t end = j->end_ts ? j->end_ts : now;
+        snprintf(line, sizeof(line), "%-9s %-10s %-7s %4d %4d %6s  %s\n",
+                 j->id.c_str(), state_name(j->state),
+                 j->worker_id.empty() ? "-" : j->worker_id.c_str(),
+                 j->prio, j->runs, fmt_age(end - j->submit_ts).c_str(), cmd.c_str());
+        out += line;
+    }
+    if (js.empty()) out += "(no jobs)\n";
+    return out;
+}
+
