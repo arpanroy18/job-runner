@@ -592,3 +592,39 @@ std::string Scheduler::worker_table() const {
     return out;
 }
 
+std::string Scheduler::job_info(const std::string& id) const {
+    auto it = jobs_.find(id);
+    if (it == jobs_.end()) return "no such job: " + id;
+    const Job& j = it->second;
+    int64_t now = now_ms();
+    std::string out;
+    char line[256];
+    snprintf(line, sizeof(line), "%s  %-10s  prio %d\n", j.id.c_str(),
+             state_name(j.state), j.prio);
+    out += line;
+    if (!j.name.empty()) out += "  name:      " + j.name + "\n";
+    std::string cmd;
+    for (const auto& a : j.argv) { if (!cmd.empty()) cmd += ' '; cmd += a; }
+    out += "  command:   " + cmd + "\n";
+    if (!j.cwd.empty()) out += "  cwd:       " + j.cwd + "\n";
+    if (!j.env.empty()) out += "  env:       " + join_list(j.env) + "\n";
+    snprintf(line, sizeof(line), "  request:   %d cpu, %d MB, %d gpu%s\n",
+             j.cpus, j.mem_mb, j.gpus, j.limit ? " (enforced)" : "");
+    out += line;
+    if (!j.require.empty()) out += "  requires:  " + join_list(j.require) + "\n";
+    if (!j.after.empty())   out += "  after:     " + join_list(j.after) + "\n";
+    snprintf(line, sizeof(line), "  runs:      %d (max_retries %d)\n", j.runs, j.max_retries);
+    out += line;
+    if (j.state == JobState::Queued && j.ready_ts > now)
+        out += "  backoff:   ready in " + fmt_age(j.ready_ts - now) + "\n";
+    if (!j.worker_id.empty()) out += "  worker:    " + j.worker_id + "\n";
+    out += "  submitted: " + fmt_age(now - j.submit_ts) + " ago\n";
+    if (j.start_ts) out += "  started:   " + fmt_age(now - j.start_ts) + " ago\n";
+    if (j.end_ts) out += "  finished:  " + fmt_age(j.end_ts - j.start_ts) + " runtime\n";
+    if (j.exit_code >= 0)
+        out += "  exit:      " + std::to_string(j.exit_code) + "\n";
+    if (!j.note.empty()) out += "  note:      " + j.note + "\n";
+    if (!j.output_tail.empty()) out += "--- output tail ---\n" + j.output_tail;
+    return out;
+}
+
