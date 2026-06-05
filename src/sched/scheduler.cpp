@@ -561,3 +561,34 @@ std::string Scheduler::job_table() const {
     return out;
 }
 
+std::string Scheduler::worker_table() const {
+    std::vector<const Worker*> ws;
+    for (auto& [_, w] : workers_) ws.push_back(&w);
+    std::sort(ws.begin(), ws.end(),
+              [](const Worker* a, const Worker* b) { return a->id < b->id; });
+
+    std::string out;
+    char line[384];
+    snprintf(line, sizeof(line), "%-7s %-14s %-21s %-8s %-9s %-15s %-5s %5s  %-8s %s\n",
+             "WORKER", "NAME", "PEER", "STATE", "CPU", "MEM(MB)", "GPU", "TASKS",
+             "LAST-BEAT", "LABELS");
+    out += line;
+    int64_t now = now_ms();
+    for (const Worker* w : ws) {
+        char cpu[16], mem[24], gpu[16];
+        snprintf(cpu, sizeof(cpu), "%d/%d", w->used_cpus, w->cpus);
+        snprintf(mem, sizeof(mem), "%d/%d", w->used_mem, w->mem_mb);
+        snprintf(gpu, sizeof(gpu), "%d/%d", w->used_gpus, w->gpus);
+        std::string labels;
+        for (const auto& l : w->labels) { if (!labels.empty()) labels += ','; labels += l; }
+        const char* st = !w->alive ? "lost" : w->draining ? "drain" : "up";
+        snprintf(line, sizeof(line), "%-7s %-14s %-21s %-8s %-9s %-15s %-5s %5zu  %-8s %s\n",
+                 w->id.c_str(), w->name.c_str(), w->peer.c_str(), st,
+                 cpu, mem, gpu, w->tasks.size(),
+                 fmt_age(now - w->last_seen).c_str(), labels.c_str());
+        out += line;
+    }
+    if (ws.empty()) out += "(no workers)\n";
+    return out;
+}
+
