@@ -628,3 +628,28 @@ std::string Scheduler::job_info(const std::string& id) const {
     return out;
 }
 
+std::string Scheduler::stats() const {
+    int up = 0, down = 0, dr = 0, q = 0, b = 0, r = 0, d = 0, fl = 0, cx = 0;
+    for (auto& [_, w] : workers_) {
+        if (!w.alive) down++;
+        else if (w.draining) dr++;
+        else up++;
+    }
+    for (auto& [_, j] : jobs_) {
+        switch (j.state) {
+            case JobState::Queued: q++; break;
+            case JobState::Blocked: b++; break;
+            case JobState::Running: r++; break;
+            case JobState::Done: d++; break;
+            case JobState::Failed: fl++; break;
+            case JobState::Cancelled: cx++; break;
+        }
+    }
+    char buf[192];
+    snprintf(buf, sizeof(buf),
+             "workers: %d up, %d draining, %d lost | jobs: %d queued, %d blocked, "
+             "%d running, %d done, %d failed, %d cancelled\n",
+             up, dr, down, q, b, r, d, fl, cx);
+    return buf;
+}
+
