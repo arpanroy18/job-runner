@@ -663,3 +663,9 @@ void Scheduler::journal_submit(const Job& j) {
         join_list(j.after), join_list(j.require), j.limit ? "1" : "0"}));
 }
 
+void Scheduler::journal_state(const Job& j) {
+    journal_.append(join_fields({
+        "T", j.id, state_name(j.state), std::to_string(now_ms()),
+        std::to_string(j.exit_code), j.note, std::to_string(j.runs)}));
+}
+
