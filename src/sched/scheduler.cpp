@@ -653,3 +653,13 @@ std::string Scheduler::stats() const {
     return buf;
 }
 
+// ------------------------------------------------------------------ journal
+
+void Scheduler::journal_submit(const Job& j) {
+    journal_.append(join_fields({
+        "S", j.id, j.name, std::to_string(j.prio), std::to_string(j.cpus),
+        std::to_string(j.mem_mb), std::to_string(j.gpus), std::to_string(j.max_retries),
+        std::to_string(j.submit_ts), j.cwd, join_list(j.env), join_list(j.argv),
+        join_list(j.after), join_list(j.require), j.limit ? "1" : "0"}));
+}
+
