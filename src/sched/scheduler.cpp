@@ -746,3 +746,19 @@ void Scheduler::maybe_compact(bool force) {
     journal_.rewrite(recs);
 }
 
+// ------------------------------------------------------------------ janitor
+
+void Scheduler::janitor_loop() {
+    while (!stopping_) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        std::lock_guard<std::mutex> lk(mu_);
+        int64_t now = now_ms();
+        for (auto& [_, w] : workers_)
+            if (w.alive && now - w.last_seen > kHeartbeatTimeoutMs) {
+                // TODO: reap worker
+            }
+        dispatch();
+    }
+}
+
+} // namespace jr
