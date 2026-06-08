@@ -728,3 +728,21 @@ void Scheduler::recover() {
         log_line("sched", "recovered " + std::to_string(jobs_.size()) + " jobs from journal");
 }
 
+void Scheduler::maybe_compact(bool force) {
+    if (!force && journal_.lines() < 5000) return;
+    std::vector<std::string> recs;
+    for (auto& [_, j] : jobs_) {
+        recs.push_back(join_fields({
+            "S", j.id, j.name, std::to_string(j.prio), std::to_string(j.cpus),
+            std::to_string(j.mem_mb), std::to_string(j.gpus), std::to_string(j.max_retries),
+            std::to_string(j.submit_ts), j.cwd, join_list(j.env), join_list(j.argv),
+            join_list(j.after), join_list(j.require), j.limit ? "1" : "0"}));
+        recs.push_back(join_fields({
+            "T", j.id, state_name(j.state), std::to_string(j.end_ts),
+            std::to_string(j.exit_code), j.note, std::to_string(j.runs)}));
+    }
+    recs.push_back(join_fields({"W", std::to_string(next_job_),
+                                std::to_string(next_task_), std::to_string(next_worker_)}));
+    journal_.rewrite(recs);
+}
+
