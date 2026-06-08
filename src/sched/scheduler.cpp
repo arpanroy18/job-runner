@@ -669,3 +669,62 @@ void Scheduler::journal_state(const Job& j) {
         std::to_string(j.exit_code), j.note, std::to_string(j.runs)}));
 }
 
+void Scheduler::recover() {
+    journal_.replay([this](const std::string& line) {
+        auto f = split_fields(line);
+        if (f.empty()) return;
+        if (f[0] == "S" && f.size() >= 12) {
+            Job j;
+            j.id = f[1];
+            j.name = f[2];
+            j.prio = to_int(f[3], 0);
+            j.cpus = to_int(f[4], 1);
+            j.mem_mb = to_int(f[5], 256);
+            j.gpus = to_int(f[6], 0);
+            j.max_retries = to_int(f[7], 0);
+            j.submit_ts = strtoll(f[8].c_str(), nullptr, 10);
+            j.cwd = f[9];
+            j.env = split_list(f[10]);
+            j.argv = split_list(f[11]);
+            if (f.size() > 12) j.after = split_list(f[12]);
+            if (f.size() > 13) j.require = split_list(f[13]);
+            if (f.size() > 14) j.limit = f[14] == "1";
+            jobs_[j.id] = std::move(j);
+        } else if (f[0] == "T" && f.size() >= 3) {
+            auto it = jobs_.find(f[1]);
+            if (it == jobs_.end()) return;
+            Job& j = it->second;
+            for (auto s : {JobState::Queued, JobState::Blocked, JobState::Running,
+                           JobState::Done, JobState::Failed, JobState::Cancelled})
+                if (f[2] == state_name(s)) j.state = s;
+            if (f.size() > 4) j.exit_code = to_int(f[4], -1);
+            if (f.size() > 5) j.note = f[5];
+            if (f.size() > 6) j.runs = to_int(f[6], 0);
+        } else if (f[0] == "W" && f.size() >= 4) {
+            next_job_ = strtoull(f[1].c_str(), nullptr, 10);
+            next_task_ = strtoull(f[2].c_str(), nullptr, 10);
+            next_worker_ = strtoull(f[3].c_str(), nullptr, 10);
+        }
+    });
+    // Tasks in flight when the scheduler died are orphaned on the workers;
+    // requeue those jobs — stale results are ignored when they arrive.
+    for (auto& [_, j] : jobs_) {
+        if (j.state == JobState::Running) {
+            j.state = JobState::Queued;
+            j.worker_id.clear();
+            j.task_id.clear();
+            j.note = "requeued after scheduler restart";
+        }
+        // Blocked state isn't journaled at submit; recompute it from deps.
+        if (j.state == JobState::Queued && !j.after.empty()) {
+            for (const auto& d : j.after) {
+                auto it = jobs_.find(d);
+                if (it != jobs_.end() && it->second.state != JobState::Done)
+                    j.state = JobState::Blocked;
+            }
+        }
+    }
+    if (!jobs_.empty())
+        log_line("sched", "recovered " + std::to_string(jobs_.size()) + " jobs from journal");
+}
+
