@@ -51,3 +51,23 @@ int cli_request(const Addr& a, uint8_t type, const std::string& payload) {
     return 0;
 }
 
+static void usage_submit() {
+    fputs(
+        "usage: jr submit [opts] <cmd> [args...]\n"
+        "       jr submit [opts] -- <cmd> [args...]\n"
+        "  --cpus N        cpus to reserve (default 1)\n"
+        "  --mem|--memory V   MB, or K/M/G suffix (default 256M)\n"
+        "  --gpu           shorthand for --gpus 1\n"
+        "  --gpus N        gpus to reserve (default 0)\n"
+        "  -p|--prio N     priority, higher first (default 0)\n"
+        "  -r|--retries N  retries on failure/loss (default 0)\n"
+        "  --after J[,J..] run only after these jobs finish done\n"
+        "  --require K=V   only run on workers carrying this label (repeatable)\n"
+        "  --limit         enforce --mem as a hard address-space limit\n"
+        "  --name S        display name\n"
+        "  --env K=V       extra env var (repeatable)\n"
+        "  --cwd P         working directory on the worker\n"
+        "  Flags may precede the command; everything after the command is its argv.\n",
+        stderr);
+}
+
