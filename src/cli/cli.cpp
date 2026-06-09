@@ -30,3 +30,24 @@ Addr parse_addr(const std::string& s) {
 }
 
 // One request -> one reply. Prints the reply body; returns exit code.
+int cli_request(const Addr& a, uint8_t type, const std::string& payload) {
+    Conn c = tcp_connect(a.host, a.port);
+    if (!c) {
+        fprintf(stderr, "jr: cannot reach scheduler at %s:%d\n", a.host.c_str(), a.port);
+        return 1;
+    }
+    if (!c.send_msg(type, payload)) return 1;
+    uint8_t rtype;
+    std::string body;
+    if (!c.recv_msg(rtype, body)) {
+        fprintf(stderr, "jr: connection lost\n");
+        return 1;
+    }
+    if ((Msg)rtype == Msg::Error) {
+        fprintf(stderr, "jr: %s\n", body.c_str());
+        return 1;
+    }
+    fputs(body.c_str(), stdout);
+    return 0;
+}
+
