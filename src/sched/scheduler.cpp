@@ -754,9 +754,8 @@ void Scheduler::janitor_loop() {
         std::lock_guard<std::mutex> lk(mu_);
         int64_t now = now_ms();
         for (auto& [_, w] : workers_)
-            if (w.alive && now - w.last_seen > kHeartbeatTimeoutMs) {
-                // TODO: reap worker
-            }
+            if (w.alive && now - w.last_seen > kHeartbeatTimeoutMs)
+                kill_worker(w);
         dispatch();
     }
 }
