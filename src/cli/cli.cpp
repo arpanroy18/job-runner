@@ -154,3 +154,29 @@ int cli_submit(const Addr& a, std::vector<std::string> args) {
 
 // Stream a job's output: prints the stored tail, then (with -f) live chunks
 // relayed through the scheduler until the job terminates.
+int cli_logs(const Addr& a, const std::string& job_id, bool follow) {
+    Conn c = tcp_connect(a.host, a.port);
+    if (!c) {
+        fprintf(stderr, "jr: cannot reach scheduler at %s:%d\n", a.host.c_str(), a.port);
+        return 1;
+    }
+    if (!c.send_msg((uint8_t)Msg::SubLogs, join_fields({job_id, follow ? "1" : "0"})))
+        return 1;
+    for (;;) {
+        uint8_t t;
+        std::string chunk;
+        if (!c.recv_msg(t, chunk)) {
+            fprintf(stderr, "\njr: connection lost\n");
+            return 1;
+        }
+        if ((Msg)t == Msg::LogEnd) return 0;
+        if ((Msg)t == Msg::Error) {
+            fprintf(stderr, "jr: %s\n", chunk.c_str());
+            return 1;
+        }
+        fwrite(chunk.data(), 1, chunk.size(), stdout);
+        fflush(stdout);
+    }
+}
+
+// Poll until the job reaches a terminal state; exit code mirrors the job's.
