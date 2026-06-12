@@ -36,3 +36,18 @@ static std::string state_dir() {
     return std::string(home ? home : ".") + "/.jr";
 }
 
+static int usage() {
+    fputs(
+        "usage: jr <command> [args]\n"
+        "  schedd [--port N] [--state-dir DIR]     run the scheduler\n"
+        "  worker [--addr H:P] [--cpus N] [--mem V] [--gpus N] [--name S]\n"
+        "         [--label K=V]...                run a worker agent\n"
+        "  submit [opts] <cmd> [args...]           (see jr submit -h)\n"
+        "  list | workers | stats | top\n"
+        "  info <job> | logs <job> [-f] | wait <job> | cancel <job>\n"
+        "  drain <worker> | undrain <worker>       pause/resume new assignments\n"
+        "  global: --addr host:port (or $JR_ADDR, default 127.0.0.1:7890)\n",
+        stderr);
+    return 2;
+}
+
