@@ -180,3 +180,30 @@ int cli_logs(const Addr& a, const std::string& job_id, bool follow) {
 }
 
 // Poll until the job reaches a terminal state; exit code mirrors the job's.
+int cli_wait(const Addr& a, const std::string& job_id) {
+    for (;;) {
+        Conn c = tcp_connect(a.host, a.port);
+        if (!c) {
+            fprintf(stderr, "jr: cannot reach scheduler at %s:%d\n", a.host.c_str(), a.port);
+            return 1;
+        }
+        if (!c.send_msg((uint8_t)Msg::JobState, job_id)) return 1;
+        uint8_t t;
+        std::string body;
+        if (!c.recv_msg(t, body)) return 1;
+        auto f = split_fields(body);
+        const std::string& st = f.empty() ? body : f[0];
+        if (st == "unknown") {
+            fprintf(stderr, "jr: no such job: %s\n", job_id.c_str());
+            return 1;
+        }
+        if (st == "done" || st == "failed" || st == "cancelled") {
+            int code = f.size() > 1 ? atoi(f[1].c_str()) : 1;
+            printf("%s %s (exit %d)\n", job_id.c_str(), st.c_str(), code);
+            return st == "done" ? (code < 0 ? 0 : code) : 1;
+        }
+        c.close();
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+}
+
