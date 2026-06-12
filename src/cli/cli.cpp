@@ -207,3 +207,31 @@ int cli_wait(const Addr& a, const std::string& job_id) {
     }
 }
 
+int cli_top(const Addr& a) {
+    while (true) {
+        auto get = [&](uint8_t t) -> std::string {
+            Conn cc = tcp_connect(a.host, a.port);
+            if (!cc || !cc.send_msg(t, "")) return "";
+            uint8_t rt;
+            std::string body;
+            if (!cc.recv_msg(rt, body)) return "";
+            return body;
+        };
+        std::string stats = get((uint8_t)Msg::Stats);
+        if (stats.empty()) {
+            fprintf(stderr, "jr: cannot reach scheduler at %s:%d\n", a.host.c_str(), a.port);
+            return 1;
+        }
+        fputs("\033[H\033[J", stdout);
+        fputs(stats.c_str(), stdout);
+        fputc('\n', stdout);
+        fputs(get((uint8_t)Msg::ListWorkers).c_str(), stdout);
+        fputc('\n', stdout);
+        fputs(get((uint8_t)Msg::ListJobs).c_str(), stdout);
+        fflush(stdout);
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+    return 0;
+}
+
+} // namespace jr
