@@ -2,12 +2,14 @@
 //
 //   jr schedd      run the scheduler (accepts workers + cli)
 //   jr worker      run a worker agent
-//   jr submit      submit a job
+//   jr submit      submit a job (deps, labels, limits, retries)
 //   jr list        list jobs
 //   jr info <job>  job detail + output tail
-//   jr logs <job>  captured output tail
+//   jr logs <job>  captured output tail (-f streams live)
+//   jr wait <job>  block until the job terminates
 //   jr cancel <job>
 //   jr workers     list workers
+//   jr drain <worker> [/undrain]  stop/start new assignments on a worker
 //   jr stats       one-line status
 //   jr top         live dashboard
 //
@@ -39,9 +41,11 @@ static int usage() {
         "usage: jr <command> [args]\n"
         "  schedd [--port N] [--state-dir DIR]     run the scheduler\n"
         "  worker [--addr H:P] [--cpus N] [--mem V] [--gpus N] [--name S]\n"
+        "         [--label K=V]...                run a worker agent\n"
         "  submit [opts] <cmd> [args...]           (see jr submit -h)\n"
         "  list | workers | stats | top\n"
-        "  info <job> | logs <job> | cancel <job>\n"
+        "  info <job> | logs <job> [-f] | wait <job> | cancel <job>\n"
+        "  drain <worker> | undrain <worker>       pause/resume new assignments\n"
         "  global: --addr host:port (or $JR_ADDR, default 127.0.0.1:7890)\n",
         stderr);
     return 2;
@@ -92,6 +96,7 @@ int main(int argc, char** argv) {
             else if (rest[i] == "--gpus") o.gpus = atoi(need("--gpus").c_str());
             else if (rest[i] == "--gpu") o.gpus = 1;
             else if (rest[i] == "--name") o.name = need("--name");
+            else if (rest[i] == "--label") o.labels.push_back(need("--label"));
             else return usage();
         }
         return run_worker(addr.host, addr.port, o, state_dir());
@@ -102,12 +107,25 @@ int main(int argc, char** argv) {
     if (cmd == "workers") return cli_request(addr, (uint8_t)Msg::ListWorkers);
     if (cmd == "stats")   return cli_request(addr, (uint8_t)Msg::Stats);
     if (cmd == "top")     return cli_top(addr);
-    if (cmd == "info" || cmd == "logs" || cmd == "cancel") {
+    if (cmd == "info" || cmd == "cancel") {
         if (rest.size() != 1) return usage();
-        uint8_t t = cmd == "info" ? (uint8_t)Msg::JobInfo
-                  : cmd == "logs" ? (uint8_t)Msg::JobInfo
-                                  : (uint8_t)Msg::CancelJob;
-        return cli_request(addr, t, rest[0]);
+        return cli_request(addr, cmd == "info" ? (uint8_t)Msg::JobInfo
+                                               : (uint8_t)Msg::CancelJob, rest[0]);
+    }
+    if (cmd == "wait") {
+        if (rest.size() != 1) return usage();
+        return cli_wait(addr, rest[0]);
+    }
+    if (cmd == "logs") {
+        if (rest.empty() || rest.size() > 2) return usage();
+        bool follow = rest.size() == 2 && (rest[1] == "-f" || rest[1] == "--follow");
+        if (rest.size() == 2 && !follow) return usage();
+        return cli_logs(addr, rest[0], follow);
+    }
+    if (cmd == "drain" || cmd == "undrain") {
+        if (rest.size() != 1) return usage();
+        return cli_request(addr, (uint8_t)Msg::DrainWorker,
+                           join_fields({rest[0], cmd == "drain" ? "1" : "0"}));
     }
     return usage();
 }

@@ -16,5 +16,7 @@ Addr parse_addr(const std::string& s);
 int cli_submit(const Addr& a, std::vector<std::string> args);
 int cli_request(const Addr& a, uint8_t type, const std::string& payload = {});
 int cli_top(const Addr& a);
+int cli_logs(const Addr& a, const std::string& job_id, bool follow);
+int cli_wait(const Addr& a, const std::string& job_id);
 
 } // namespace jr

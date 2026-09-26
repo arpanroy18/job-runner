@@ -61,6 +61,9 @@ static void usage_submit() {
         "  --gpus N        gpus to reserve (default 0)\n"
         "  -p|--prio N     priority, higher first (default 0)\n"
         "  -r|--retries N  retries on failure/loss (default 0)\n"
+        "  --after J[,J..] run only after these jobs finish done\n"
+        "  --require K=V   only run on workers carrying this label (repeatable)\n"
+        "  --limit         enforce --mem as a hard address-space limit\n"
         "  --name S        display name\n"
         "  --env K=V       extra env var (repeatable)\n"
         "  --cwd P         working directory on the worker\n"
@@ -70,8 +73,9 @@ static void usage_submit() {
 
 int cli_submit(const Addr& a, std::vector<std::string> args) {
     std::string name, cwd, mem = "256M";
-    std::vector<std::string> env;
+    std::vector<std::string> env, require, after;
     int cpus = 1, gpus = 0, prio = 0, retries = 0;
+    bool limit = false;
     std::vector<std::string> argv;
 
     for (size_t i = 0; i < args.size(); i++) {
@@ -93,6 +97,18 @@ int cli_submit(const Addr& a, std::vector<std::string> args) {
         else if (s == "--name")      name = need("--name");
         else if (s == "--env")       env.push_back(need("--env"));
         else if (s == "--cwd")       cwd = need("--cwd");
+        else if (s == "--require")   require.push_back(need("--require"));
+        else if (s == "--limit")     limit = true;
+        else if (s == "--after") {
+            std::string v = need("--after");
+            size_t st = 0;
+            for (;;) {
+                size_t comma = v.find(',', st);
+                after.push_back(v.substr(st, comma == std::string::npos ? comma : comma - st));
+                if (comma == std::string::npos) break;
+                st = comma + 1;
+            }
+        }
         else if (s == "-h" || s == "--help") { usage_submit(); return 2; }
         else if (s.size() && s[0] == '-') {
             fprintf(stderr, "jr: unknown flag %s (put it after -- if it's the command's)\n", s.c_str());
@@ -122,11 +138,73 @@ int cli_submit(const Addr& a, std::vector<std::string> args) {
             return 2;
         }
 
+    for (const auto& v : require)
+        if (has_reserved_chars(v) || v.find('=') == std::string::npos) {
+            fprintf(stderr, "jr: bad --require %s (want K=V)\n", v.c_str());
+            return 2;
+        }
+
     std::string payload = join_fields({
         name, std::to_string(prio), std::to_string(cpus), std::to_string(mem_mb),
         std::to_string(gpus), std::to_string(retries), cwd,
-        join_list(env), join_list(argv)});
+        join_list(env), join_list(argv), join_list(after), join_list(require),
+        limit ? "1" : "0"});
     return cli_request(a, (uint8_t)Msg::Submit, payload);
+}
+
+// Stream a job's output: prints the stored tail, then (with -f) live chunks
+// relayed through the scheduler until the job terminates.
+int cli_logs(const Addr& a, const std::string& job_id, bool follow) {
+    Conn c = tcp_connect(a.host, a.port);
+    if (!c) {
+        fprintf(stderr, "jr: cannot reach scheduler at %s:%d\n", a.host.c_str(), a.port);
+        return 1;
+    }
+    if (!c.send_msg((uint8_t)Msg::SubLogs, join_fields({job_id, follow ? "1" : "0"})))
+        return 1;
+    for (;;) {
+        uint8_t t;
+        std::string chunk;
+        if (!c.recv_msg(t, chunk)) {
+            fprintf(stderr, "\njr: connection lost\n");
+            return 1;
+        }
+        if ((Msg)t == Msg::LogEnd) return 0;
+        if ((Msg)t == Msg::Error) {
+            fprintf(stderr, "jr: %s\n", chunk.c_str());
+            return 1;
+        }
+        fwrite(chunk.data(), 1, chunk.size(), stdout);
+        fflush(stdout);
+    }
+}
+
+// Poll until the job reaches a terminal state; exit code mirrors the job's.
+int cli_wait(const Addr& a, const std::string& job_id) {
+    for (;;) {
+        Conn c = tcp_connect(a.host, a.port);
+        if (!c) {
+            fprintf(stderr, "jr: cannot reach scheduler at %s:%d\n", a.host.c_str(), a.port);
+            return 1;
+        }
+        if (!c.send_msg((uint8_t)Msg::JobState, job_id)) return 1;
+        uint8_t t;
+        std::string body;
+        if (!c.recv_msg(t, body)) return 1;
+        auto f = split_fields(body);
+        const std::string& st = f.empty() ? body : f[0];
+        if (st == "unknown") {
+            fprintf(stderr, "jr: no such job: %s\n", job_id.c_str());
+            return 1;
+        }
+        if (st == "done" || st == "failed" || st == "cancelled") {
+            int code = f.size() > 1 ? atoi(f[1].c_str()) : 1;
+            printf("%s %s (exit %d)\n", job_id.c_str(), st.c_str(), code);
+            return st == "done" ? (code < 0 ? 0 : code) : 1;
+        }
+        c.close();
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
 }
 
 int cli_top(const Addr& a) {

@@ -25,12 +25,17 @@ void on_signal(int) { g_stop = true; }
 const char* state_name(JobState s) {
     switch (s) {
         case JobState::Queued:    return "queued";
+        case JobState::Blocked:   return "blocked";
         case JobState::Running:   return "running";
         case JobState::Done:      return "done";
         case JobState::Failed:    return "failed";
         case JobState::Cancelled: return "cancelled";
     }
     return "?";
+}
+
+static bool is_terminal(JobState s) {
+    return s == JobState::Done || s == JobState::Failed || s == JobState::Cancelled;
 }
 
 static int to_int(const std::string& s, int fallback = -1) {
@@ -96,6 +101,12 @@ void Scheduler::serve_conn(Conn c) {
         return;
     }
 
+    if ((Msg)type == Msg::SubLogs) {
+        std::lock_guard<std::mutex> lk(mu_);
+        on_sub_logs(std::move(c), f); // takes ownership until LogEnd
+        return;
+    }
+
     std::string reply;
     {
         std::lock_guard<std::mutex> lk(mu_);
@@ -110,6 +121,27 @@ void Scheduler::serve_conn(Conn c) {
             case Msg::ListWorkers: reply = worker_table(); break;
             case Msg::JobInfo:     reply = f.empty() ? "usage: info <job>" : job_info(f[0]); break;
             case Msg::Stats:       reply = stats(); break;
+            case Msg::JobState: {
+                auto it = f.empty() ? jobs_.end() : jobs_.find(f[0]);
+                reply = it == jobs_.end()
+                        ? "unknown"
+                        : join_fields({state_name(it->second.state),
+                                       std::to_string(it->second.exit_code)});
+                break;
+            }
+            case Msg::DrainWorker: {
+                if (f.size() < 2) { c.send_msg((uint8_t)Msg::Error, "usage: drain <worker> [0|1]"); return; }
+                auto it = workers_.find(f[0]);
+                if (it == workers_.end() || !it->second.alive) {
+                    c.send_msg((uint8_t)Msg::Error, "no live worker: " + f[0]);
+                    return;
+                }
+                it->second.draining = f[1] != "0";
+                c.send_msg((uint8_t)Msg::Reply,
+                           f[0] + (it->second.draining ? " draining\n" : " undrained\n"));
+                dispatch();
+                return;
+            }
             default:
                 c.send_msg((uint8_t)Msg::Error, "unknown request");
                 return;
@@ -137,6 +169,8 @@ void Scheduler::on_register(Conn c, const std::vector<std::string>& f) {
         w->cpus = to_int(f[1], 1);
         w->mem_mb = to_int(f[2], 0);
         w->gpus = to_int(f[3], 0);
+        if (f.size() > 4)
+            for (const auto& l : split_list(f[4])) w->labels.insert(l);
         w->last_seen = now_ms();
         w->conn = std::move(c);
         if (!send_to_worker(*w, (uint8_t)Msg::RegAck, wid)) {
@@ -159,6 +193,7 @@ void Scheduler::on_register(Conn c, const std::vector<std::string>& f) {
         if (!w->alive) break;
         w->last_seen = now_ms();
         if ((Msg)type == Msg::TaskResult) on_task_result(f);
+        else if ((Msg)type == Msg::LogData) on_log_data(f);
         // Heartbeat: timestamp updated above; running-task ids in f[1] are
         // advisory (scheduler is authoritative).
     }
@@ -193,13 +228,53 @@ bool Scheduler::send_to_worker(Worker& w, uint8_t type, const std::string& paylo
 
 // ------------------------------------------------------------------ dispatch
 
+// Move blocked jobs forward when their dependencies resolve: all deps done
+// -> queued; any dep failed/cancelled -> failed ("dep broken"). Job ids are
+// minted at submit time and deps are immutable, so dependency cycles cannot
+// be constructed.
+void Scheduler::promote_blocked() {
+    for (auto& [_, j] : jobs_) {
+        if (j.state != JobState::Blocked) continue;
+        bool bad_dep = false;
+        for (const auto& d : j.after) {
+            auto it = jobs_.find(d);
+            if (it != jobs_.end() && it->second.state != JobState::Done) {
+                if (it->second.state == JobState::Failed ||
+                    it->second.state == JobState::Cancelled)
+                    bad_dep = true;
+            }
+        }
+        if (bad_dep) {
+            j.note = "dependency failed";
+            finish_job(j, JobState::Failed);
+            log_line("sched", "job " + j.id + " failed (dependency failed)");
+        } else {
+            bool all_done = true;
+            for (const auto& d : j.after) {
+                auto it = jobs_.find(d);
+                if (it == jobs_.end() || it->second.state != JobState::Done)
+                    all_done = false;
+            }
+            if (all_done) {
+                j.state = JobState::Queued;
+                j.ready_ts = 0;
+                journal_state(j);
+                log_line("sched", "job " + j.id + " unblocked");
+            }
+        }
+    }
+}
+
 // Best fit: pick the fitting worker with the least free cpus, keeping big
 // workers free for big jobs. Jobs are tried in (prio desc, age asc) order;
 // a job that doesn't fit doesn't block smaller jobs behind it (backfill).
 void Scheduler::dispatch() {
+    promote_blocked();
+
     std::vector<Job*> queued;
+    int64_t now = now_ms();
     for (auto& [_, j] : jobs_)
-        if (j.state == JobState::Queued) queued.push_back(&j);
+        if (j.state == JobState::Queued && j.ready_ts <= now) queued.push_back(&j);
     std::sort(queued.begin(), queued.end(), [](const Job* a, const Job* b) {
         return a->prio != b->prio ? a->prio > b->prio : a->submit_ts < b->submit_ts;
     });
@@ -208,10 +283,14 @@ void Scheduler::dispatch() {
         Worker* best = nullptr;
         for (auto& [_, w] : workers_) {
             int free_cpu = w.cpus - w.used_cpus;
-            if (!w.alive || free_cpu < j->cpus ||
+            if (!w.alive || w.draining || free_cpu < j->cpus ||
                 w.mem_mb - w.used_mem < j->mem_mb ||
                 w.gpus - w.used_gpus < j->gpus)
                 continue;
+            bool labels_ok = true;
+            for (const auto& r : j->require)
+                if (!w.labels.count(r)) labels_ok = false;
+            if (!labels_ok) continue;
             if (!best || free_cpu < best->cpus - best->used_cpus) best = &w;
         }
         if (!best) continue;
@@ -220,7 +299,9 @@ void Scheduler::dispatch() {
         t.id = "t-" + std::to_string(next_task_++);
         t.job_id = j->id;
         t.worker_id = best->id;
-        std::string payload = join_fields({t.id, j->id, j->cwd, join_list(j->env), join_list(j->argv)});
+        std::string payload = join_fields({t.id, j->id, j->cwd, join_list(j->env),
+                                           join_list(j->argv), std::to_string(j->mem_mb),
+                                           j->limit ? "1" : "0"});
         if (!send_to_worker(*best, (uint8_t)Msg::Assign, payload)) {
             kill_worker(*best);
             continue;
@@ -232,12 +313,16 @@ void Scheduler::dispatch() {
         tasks_.emplace(t.id, t);
         j->runs++;
         j->state = JobState::Running;
-        j->start_ts = now_ms();
+        j->start_ts = now;
+        j->ready_ts = 0;
         j->worker_id = best->id;
         j->task_id = t.id;
         journal_state(*j);
         log_line("sched", "job " + j->id + " -> " + best->id + " (run " +
                           std::to_string(j->runs) + ")");
+        auto it = subs_.find(j->id);
+        if (it != subs_.end() && !it->second.empty())
+            send_to_worker(*best, (uint8_t)Msg::LogSub, t.id);
     }
 }
 
@@ -256,16 +341,26 @@ void Scheduler::release_task(const Task& t) {
     tasks_.erase(t.id);
 }
 
+// Terminal transition: stamp, journal, tell log subscribers we're done.
+void Scheduler::finish_job(Job& j, JobState s) {
+    j.state = s;
+    j.end_ts = now_ms();
+    j.task_id.clear();
+    journal_state(j);
+    end_subs(j.id);
+    maybe_compact();
+}
+
 void Scheduler::fail_or_retry(Job& j, const std::string& note) {
     j.note = note;
     if (j.runs <= j.max_retries) {
         j.state = JobState::Queued;
+        // linear backoff: run n waits n*2s before requeue
+        j.ready_ts = now_ms() + j.runs * 2000;
         journal_state(j);
         log_line("sched", "job " + j.id + " requeued (" + note + ")");
     } else {
-        j.state = JobState::Failed;
-        j.end_ts = now_ms();
-        journal_state(j);
+        finish_job(j, JobState::Failed);
         log_line("sched", "job " + j.id + " failed (" + note + ")");
     }
     maybe_compact();
@@ -286,15 +381,75 @@ void Scheduler::on_task_result(const std::vector<std::string>& f) {
     if (f.size() > 2) j.output_tail = sanitize(f[2]);
 
     if (j.exit_code == 0) {
-        j.state = JobState::Done;
-        j.end_ts = now_ms();
-        journal_state(j);
+        finish_job(j, JobState::Done);
         log_line("sched", "job " + j.id + " done");
     } else {
         fail_or_retry(j, "exit " + std::to_string(j.exit_code));
     }
     maybe_compact();
     dispatch();
+}
+
+// Worker -> scheduler log relay: forward chunks to the job's subscribers.
+void Scheduler::on_log_data(const std::vector<std::string>& f) {
+    if (f.size() < 2) return;
+    auto it = tasks_.find(f[0]);
+    if (it == tasks_.end()) return;
+    auto sit = subs_.find(it->second.job_id);
+    if (sit == subs_.end()) return;
+    const std::string& chunk = f[1];
+    auto& subs = sit->second;
+    for (size_t i = 0; i < subs.size();) {
+        Sub& s = *subs[i];
+        std::lock_guard<std::mutex> lk(s.mu);
+        if (s.conn.send_msg((uint8_t)Msg::LogChunk, chunk)) {
+            i++;
+        } else {
+            s.conn.close();
+            subs.erase(subs.begin() + i);
+        }
+    }
+}
+
+// `jr logs <job> [-f]`: replay stored tail, then (with -f) stream live chunks
+// relayed from the worker until the job reaches a terminal state.
+void Scheduler::on_sub_logs(Conn c, const std::vector<std::string>& f) {
+    if (f.empty()) {
+        c.send_msg((uint8_t)Msg::Error, "usage: logs <job> [-f]");
+        return;
+    }
+    auto it = jobs_.find(f[0]);
+    if (it == jobs_.end()) {
+        c.send_msg((uint8_t)Msg::Error, "no such job: " + f[0]);
+        return;
+    }
+    Job& j = it->second;
+    bool follow = f.size() > 1 && f[1] == "1";
+    if (!j.output_tail.empty()) c.send_msg((uint8_t)Msg::LogChunk, j.output_tail);
+    if (!follow || is_terminal(j.state)) {
+        c.send_msg((uint8_t)Msg::LogEnd, "");
+        return;
+    }
+    auto sub = std::make_shared<Sub>();
+    sub->conn = std::move(c);
+    subs_[j.id].push_back(sub);
+    // If the job is already running, ask the worker to start streaming.
+    if (j.state == JobState::Running && !j.task_id.empty()) {
+        auto wit = workers_.find(j.worker_id);
+        if (wit != workers_.end() && wit->second.alive)
+            send_to_worker(wit->second, (uint8_t)Msg::LogSub, j.task_id);
+    }
+}
+
+void Scheduler::end_subs(const std::string& job_id) {
+    auto it = subs_.find(job_id);
+    if (it == subs_.end()) return;
+    for (auto& s : it->second) {
+        std::lock_guard<std::mutex> lk(s->mu);
+        s->conn.send_msg((uint8_t)Msg::LogEnd, "");
+        s->conn.close();
+    }
+    subs_.erase(it);
 }
 
 // --------------------------------------------------------------------- cli
@@ -315,17 +470,31 @@ void Scheduler::on_submit(Conn& c, const std::vector<std::string>& f) {
     j.cwd = f[6];
     j.env = split_list(f[7]);
     j.argv = split_list(f[8]);
+    if (f.size() > 9) j.after = split_list(f[9]);
+    if (f.size() > 10) j.require = split_list(f[10]);
+    if (f.size() > 11) j.limit = f[11] == "1";
     j.submit_ts = now_ms();
 
     if (j.argv.empty() || j.argv[0].empty() || j.cpus < 1 || j.mem_mb < 1 || j.gpus < 0) {
         c.send_msg((uint8_t)Msg::Error, "invalid job spec");
         return;
     }
+    bool unmet = false;
+    for (const auto& d : j.after) {
+        auto it = jobs_.find(d);
+        if (it == jobs_.end()) {
+            c.send_msg((uint8_t)Msg::Error, "unknown dependency: " + d);
+            return;
+        }
+        // A failed dep lands in Blocked; promote_blocked fails it immediately.
+        if (it->second.state != JobState::Done) unmet = true;
+    }
     std::string id = j.id;
     journal_submit(j);
     jobs_.emplace(id, std::move(j));
     c.send_msg((uint8_t)Msg::Reply, "submitted " + id + "\n");
     log_line("sched", "job " + id + " submitted");
+    if (unmet) jobs_.at(id).state = JobState::Blocked;
     maybe_compact();
     dispatch();
 }
@@ -356,10 +525,7 @@ void Scheduler::on_cancel(Conn& c, const std::vector<std::string>& f) {
             release_task(tit->second);
         }
     }
-    j.state = JobState::Cancelled;
-    j.end_ts = now_ms();
-    j.task_id.clear();
-    journal_state(j);
+    finish_job(j, JobState::Cancelled);
     if (w) send_to_worker(*w, (uint8_t)Msg::Kill, task);
     c.send_msg((uint8_t)Msg::Reply, "cancelled " + f[0] + "\n");
     log_line("sched", "job " + f[0] + " cancelled");
@@ -402,9 +568,10 @@ std::string Scheduler::worker_table() const {
               [](const Worker* a, const Worker* b) { return a->id < b->id; });
 
     std::string out;
-    char line[320];
-    snprintf(line, sizeof(line), "%-7s %-14s %-21s %-4s %-9s %-15s %-5s %5s  %s\n",
-             "WORKER", "NAME", "PEER", "UP", "CPU", "MEM(MB)", "GPU", "TASKS", "LAST-BEAT");
+    char line[384];
+    snprintf(line, sizeof(line), "%-7s %-14s %-21s %-8s %-9s %-15s %-5s %5s  %-8s %s\n",
+             "WORKER", "NAME", "PEER", "STATE", "CPU", "MEM(MB)", "GPU", "TASKS",
+             "LAST-BEAT", "LABELS");
     out += line;
     int64_t now = now_ms();
     for (const Worker* w : ws) {
@@ -412,10 +579,13 @@ std::string Scheduler::worker_table() const {
         snprintf(cpu, sizeof(cpu), "%d/%d", w->used_cpus, w->cpus);
         snprintf(mem, sizeof(mem), "%d/%d", w->used_mem, w->mem_mb);
         snprintf(gpu, sizeof(gpu), "%d/%d", w->used_gpus, w->gpus);
-        snprintf(line, sizeof(line), "%-7s %-14s %-21s %-4s %-9s %-15s %-5s %5zu  %s\n",
-                 w->id.c_str(), w->name.c_str(), w->peer.c_str(),
-                 w->alive ? "yes" : "no", cpu, mem, gpu, w->tasks.size(),
-                 fmt_age(now - w->last_seen).c_str());
+        std::string labels;
+        for (const auto& l : w->labels) { if (!labels.empty()) labels += ','; labels += l; }
+        const char* st = !w->alive ? "lost" : w->draining ? "drain" : "up";
+        snprintf(line, sizeof(line), "%-7s %-14s %-21s %-8s %-9s %-15s %-5s %5zu  %-8s %s\n",
+                 w->id.c_str(), w->name.c_str(), w->peer.c_str(), st,
+                 cpu, mem, gpu, w->tasks.size(),
+                 fmt_age(now - w->last_seen).c_str(), labels.c_str());
         out += line;
     }
     if (ws.empty()) out += "(no workers)\n";
@@ -438,10 +608,15 @@ std::string Scheduler::job_info(const std::string& id) const {
     out += "  command:   " + cmd + "\n";
     if (!j.cwd.empty()) out += "  cwd:       " + j.cwd + "\n";
     if (!j.env.empty()) out += "  env:       " + join_list(j.env) + "\n";
-    snprintf(line, sizeof(line), "  request:   %d cpu, %d MB, %d gpu\n", j.cpus, j.mem_mb, j.gpus);
+    snprintf(line, sizeof(line), "  request:   %d cpu, %d MB, %d gpu%s\n",
+             j.cpus, j.mem_mb, j.gpus, j.limit ? " (enforced)" : "");
     out += line;
+    if (!j.require.empty()) out += "  requires:  " + join_list(j.require) + "\n";
+    if (!j.after.empty())   out += "  after:     " + join_list(j.after) + "\n";
     snprintf(line, sizeof(line), "  runs:      %d (max_retries %d)\n", j.runs, j.max_retries);
     out += line;
+    if (j.state == JobState::Queued && j.ready_ts > now)
+        out += "  backoff:   ready in " + fmt_age(j.ready_ts - now) + "\n";
     if (!j.worker_id.empty()) out += "  worker:    " + j.worker_id + "\n";
     out += "  submitted: " + fmt_age(now - j.submit_ts) + " ago\n";
     if (j.start_ts) out += "  started:   " + fmt_age(now - j.start_ts) + " ago\n";
@@ -454,22 +629,27 @@ std::string Scheduler::job_info(const std::string& id) const {
 }
 
 std::string Scheduler::stats() const {
-    int up = 0, down = 0, q = 0, r = 0, d = 0, fl = 0, cx = 0;
-    for (auto& [_, w] : workers_) (w.alive ? up : down)++;
+    int up = 0, down = 0, dr = 0, q = 0, b = 0, r = 0, d = 0, fl = 0, cx = 0;
+    for (auto& [_, w] : workers_) {
+        if (!w.alive) down++;
+        else if (w.draining) dr++;
+        else up++;
+    }
     for (auto& [_, j] : jobs_) {
         switch (j.state) {
             case JobState::Queued: q++; break;
+            case JobState::Blocked: b++; break;
             case JobState::Running: r++; break;
             case JobState::Done: d++; break;
             case JobState::Failed: fl++; break;
             case JobState::Cancelled: cx++; break;
         }
     }
-    char buf[160];
+    char buf[192];
     snprintf(buf, sizeof(buf),
-             "workers: %d up, %d lost | jobs: %d queued, %d running, "
-             "%d done, %d failed, %d cancelled\n",
-             up, down, q, r, d, fl, cx);
+             "workers: %d up, %d draining, %d lost | jobs: %d queued, %d blocked, "
+             "%d running, %d done, %d failed, %d cancelled\n",
+             up, dr, down, q, b, r, d, fl, cx);
     return buf;
 }
 
@@ -479,7 +659,8 @@ void Scheduler::journal_submit(const Job& j) {
     journal_.append(join_fields({
         "S", j.id, j.name, std::to_string(j.prio), std::to_string(j.cpus),
         std::to_string(j.mem_mb), std::to_string(j.gpus), std::to_string(j.max_retries),
-        std::to_string(j.submit_ts), j.cwd, join_list(j.env), join_list(j.argv)}));
+        std::to_string(j.submit_ts), j.cwd, join_list(j.env), join_list(j.argv),
+        join_list(j.after), join_list(j.require), j.limit ? "1" : "0"}));
 }
 
 void Scheduler::journal_state(const Job& j) {
@@ -505,13 +686,16 @@ void Scheduler::recover() {
             j.cwd = f[9];
             j.env = split_list(f[10]);
             j.argv = split_list(f[11]);
+            if (f.size() > 12) j.after = split_list(f[12]);
+            if (f.size() > 13) j.require = split_list(f[13]);
+            if (f.size() > 14) j.limit = f[14] == "1";
             jobs_[j.id] = std::move(j);
         } else if (f[0] == "T" && f.size() >= 3) {
             auto it = jobs_.find(f[1]);
             if (it == jobs_.end()) return;
             Job& j = it->second;
-            for (auto s : {JobState::Queued, JobState::Running, JobState::Done,
-                           JobState::Failed, JobState::Cancelled})
+            for (auto s : {JobState::Queued, JobState::Blocked, JobState::Running,
+                           JobState::Done, JobState::Failed, JobState::Cancelled})
                 if (f[2] == state_name(s)) j.state = s;
             if (f.size() > 4) j.exit_code = to_int(f[4], -1);
             if (f.size() > 5) j.note = f[5];
@@ -531,6 +715,14 @@ void Scheduler::recover() {
             j.task_id.clear();
             j.note = "requeued after scheduler restart";
         }
+        // Blocked state isn't journaled at submit; recompute it from deps.
+        if (j.state == JobState::Queued && !j.after.empty()) {
+            for (const auto& d : j.after) {
+                auto it = jobs_.find(d);
+                if (it != jobs_.end() && it->second.state != JobState::Done)
+                    j.state = JobState::Blocked;
+            }
+        }
     }
     if (!jobs_.empty())
         log_line("sched", "recovered " + std::to_string(jobs_.size()) + " jobs from journal");
@@ -543,7 +735,8 @@ void Scheduler::maybe_compact(bool force) {
         recs.push_back(join_fields({
             "S", j.id, j.name, std::to_string(j.prio), std::to_string(j.cpus),
             std::to_string(j.mem_mb), std::to_string(j.gpus), std::to_string(j.max_retries),
-            std::to_string(j.submit_ts), j.cwd, join_list(j.env), join_list(j.argv)}));
+            std::to_string(j.submit_ts), j.cwd, join_list(j.env), join_list(j.argv),
+            join_list(j.after), join_list(j.require), j.limit ? "1" : "0"}));
         recs.push_back(join_fields({
             "T", j.id, state_name(j.state), std::to_string(j.end_ts),
             std::to_string(j.exit_code), j.note, std::to_string(j.runs)}));

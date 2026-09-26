@@ -1,14 +1,16 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 namespace jr {
 
 struct WorkerOpts {
-    std::string name;   // default: hostname
-    int cpus = 0;       // 0 = hardware_concurrency
-    int mem_mb = 0;     // 0 = system total RAM
+    std::string name;                 // default: hostname
+    int cpus = 0;                     // 0 = hardware_concurrency
+    int mem_mb = 0;                   // 0 = system total RAM
     int gpus = 0;
+    std::vector<std::string> labels;  // "k=v" placement constraints
 };
 
 // Connects to the scheduler, registers, then serves Assign/Kill messages.
